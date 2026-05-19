@@ -3,6 +3,7 @@ import os
 import threading
 from datetime import datetime
 
+import boto3
 import pandas as pd
 from fastapi import BackgroundTasks, FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,25 +11,38 @@ from fastapi.responses import StreamingResponse
 
 from clasificador import ClasificadorChernovia
 
-app = FastAPI(title="Chernovia Health API", version="1.0.0")
+app = FastAPI(title="Chernovia Health API", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_DIR = os.path.join(BASE_DIR, "datos")
-RESULTS_DIR = os.path.join(BASE_DIR, "resultados")
-RESULTS_PATH = os.path.join(RESULTS_DIR, "resultado_clasificacion.parquet")
+# ── Configuración AWS ────────────────────────────────────────────────────────
+BUCKET = os.environ.get("S3_BUCKET", "chernovia-health-licitacion-213238636264")
+RAW_PREFIX = "raw"
+RESULTS_KEY = "results/resultado_clasificacion.parquet"
+GLUE_JOB_NAME = "chernovia-clasificacion-batch"
+TMP_DIR = os.environ.get("TMP_DIR", "/tmp/chernovia")
+TMP_RESULTS = os.path.join(TMP_DIR, "resultado_clasificacion.parquet")
 
-os.makedirs(RESULTS_DIR, exist_ok=True)
+os.makedirs(TMP_DIR, exist_ok=True)
 
 # ── Estado de procesamiento ──────────────────────────────────────────────────
 _state_lock = threading.Lock()
-_state = {"estado": "idle", "paso": "", "progreso": 0, "inicio": None, "fin": None, "total": 0, "error": None}
+_state = {
+    "estado": "idle",
+    "paso": "",
+    "progreso": 0,
+    "inicio": None,
+    "fin": None,
+    "total": 0,
+    "error": None,
+    "glue_run_id": None,
+    "modo": None,
+}
 
 # ── Caché en memoria ─────────────────────────────────────────────────────────
 _cache: dict = {"df": None, "valid": False}
@@ -47,61 +61,181 @@ def set_state(**kwargs):
 def get_df() -> pd.DataFrame | None:
     if _cache["valid"] and _cache["df"] is not None:
         return _cache["df"]
-    if not os.path.exists(RESULTS_PATH):
+
+    if os.path.exists(TMP_RESULTS):
+        _cache["df"] = pd.read_parquet(TMP_RESULTS)
+        _cache["valid"] = True
+        return _cache["df"]
+
+    try:
+        s3 = boto3.client("s3")
+        paginator = s3.get_paginator("list_objects_v2")
+        pages = paginator.paginate(Bucket=BUCKET, Prefix=RESULTS_KEY)
+        keys = [obj["Key"] for page in pages for obj in page.get("Contents", [])]
+
+        if not keys:
+            return None
+
+        frames = []
+        for key in keys:
+            if key.endswith(".parquet"):
+                obj = s3.get_object(Bucket=BUCKET, Key=key)
+                frames.append(pd.read_parquet(io.BytesIO(obj["Body"].read())))
+
+        if not frames:
+            return None
+
+        df = pd.concat(frames, ignore_index=True)
+        _cache["df"] = df
+        _cache["valid"] = True
+        df.to_parquet(TMP_RESULTS, index=False)
+        return df
+    except Exception:
         return None
-    _cache["df"] = pd.read_parquet(RESULTS_PATH)
-    _cache["valid"] = True
-    return _cache["df"]
 
 
 def invalidate_cache():
     _cache["valid"] = False
     _cache["df"] = None
+    if os.path.exists(TMP_RESULTS):
+        os.remove(TMP_RESULTS)
 
 
-# ── Procesamiento en background ──────────────────────────────────────────────
-def _run_processing():
-    set_state(estado="procesando", paso="Iniciando...", progreso=0,
-              inicio=datetime.now().isoformat(), fin=None, error=None)
+# ── Procesamiento vía AWS Glue (distribuido) ─────────────────────────────────
+def _trigger_glue():
+    set_state(
+        estado="procesando",
+        paso="Iniciando job distribuido en AWS Glue (PySpark)...",
+        progreso=5,
+        inicio=datetime.now().isoformat(),
+        fin=None,
+        error=None,
+        glue_run_id=None,
+        modo="glue",
+    )
+    try:
+        glue = boto3.client("glue")
+        response = glue.start_job_run(
+            JobName=GLUE_JOB_NAME,
+            Arguments={
+                "--BUCKET": BUCKET,
+                "--RAW_PREFIX": RAW_PREFIX,
+                "--RESULTS_KEY": RESULTS_KEY,
+            },
+        )
+        run_id = response["JobRunId"]
+        set_state(glue_run_id=run_id, paso=f"Job Glue en ejecución: {run_id}", progreso=10)
+
+        # Monitorear estado del job
+        while True:
+            import time
+            time.sleep(15)
+            run = glue.get_job_run(JobName=GLUE_JOB_NAME, RunId=run_id)
+            status = run["JobRun"]["JobRunState"]
+
+            progreso_map = {
+                "STARTING": 15,
+                "RUNNING": 60,
+                "STOPPING": 90,
+            }
+            if status in progreso_map:
+                set_state(
+                    paso=f"Procesando en Glue ({status})... Workers PySpark activos",
+                    progreso=progreso_map[status],
+                )
+            elif status == "SUCCEEDED":
+                invalidate_cache()
+                set_state(
+                    estado="completado",
+                    paso="¡Clasificación distribuida completada en AWS Glue!",
+                    progreso=100,
+                    fin=datetime.now().isoformat(),
+                )
+                break
+            elif status in ("FAILED", "ERROR", "TIMEOUT"):
+                error_msg = run["JobRun"].get("ErrorMessage", status)
+                set_state(
+                    estado="error",
+                    paso=f"Glue job falló: {status}",
+                    error=error_msg,
+                    fin=datetime.now().isoformat(),
+                )
+                break
+
+    except Exception as exc:
+        # Fallback: procesar localmente si Glue falla
+        set_state(paso="Glue no disponible, procesando localmente...", progreso=20, modo="local")
+        _run_local()
+
+
+# ── Procesamiento local (fallback) ────────────────────────────────────────────
+def _run_local():
     try:
         def on_step(paso: str, progreso: int):
             pasos = {
-                "leyendo": "Leyendo 1.2M registros...",
+                "leyendo": "Leyendo 1.2M registros desde S3...",
                 "extrayendo": "Extrayendo datos de glosas...",
                 "clasificando": "Clasificando solicitudes...",
                 "guardando": "Guardando resultados...",
             }
             set_state(paso=pasos.get(paso, paso), progreso=progreso)
 
-        clf = ClasificadorChernovia(DATA_DIR)
+        clf = ClasificadorChernovia(BUCKET, RAW_PREFIX)
         resultado = clf.procesar(on_step=on_step)
 
-        resultado.to_parquet(RESULTS_PATH, index=False)
-        invalidate_cache()
+        resultado.to_parquet(TMP_RESULTS, index=False)
 
+        set_state(paso="Subiendo resultados a S3...", progreso=95)
+        s3 = boto3.client("s3")
+        buf = io.BytesIO()
+        resultado.to_parquet(buf, index=False)
+        buf.seek(0)
+        s3.put_object(Bucket=BUCKET, Key=RESULTS_KEY, Body=buf.getvalue())
+
+        invalidate_cache()
         set_state(
             estado="completado",
-            paso="¡Clasificación completada!",
+            paso="¡Clasificación completada y guardada en S3!",
             progreso=100,
             fin=datetime.now().isoformat(),
             total=len(resultado),
         )
     except Exception as exc:
-        set_state(estado="error", paso="Error durante el procesamiento", error=str(exc),
-                  fin=datetime.now().isoformat())
+        set_state(
+            estado="error",
+            paso="Error durante el procesamiento",
+            error=str(exc),
+            fin=datetime.now().isoformat(),
+        )
 
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
 @app.post("/api/process")
-def start_process(background_tasks: BackgroundTasks):
+def start_process(background_tasks: BackgroundTasks, modo: str = Query("glue")):
     if get_state()["estado"] == "procesando":
         return {"message": "Ya hay un procesamiento en curso"}
-    background_tasks.add_task(_run_processing)
-    return {"message": "Procesamiento iniciado"}
+    if modo == "local":
+        set_state(estado="procesando", paso="Iniciando procesamiento local...", progreso=0,
+                  inicio=datetime.now().isoformat(), fin=None, error=None, modo="local")
+        background_tasks.add_task(_run_local)
+    else:
+        background_tasks.add_task(_trigger_glue)
+    return {"message": f"Procesamiento iniciado (modo={modo})"}
 
 
 @app.get("/api/process/status")
 def process_status():
+    state = get_state()
+    # Si hay un job Glue activo, actualizar estado en tiempo real
+    if state.get("estado") == "procesando" and state.get("glue_run_id"):
+        try:
+            glue = boto3.client("glue")
+            run = glue.get_job_run(JobName=GLUE_JOB_NAME, RunId=state["glue_run_id"])
+            glue_status = run["JobRun"]["JobRunState"]
+            elapsed = run["JobRun"].get("ExecutionTime", 0)
+            set_state(paso=f"Glue: {glue_status} | Tiempo: {elapsed}s")
+        except Exception:
+            pass
     return get_state()
 
 
@@ -117,7 +251,6 @@ def get_stats():
     valor_total = float(df["valor_procedimiento"].sum())
     valor_cubierto_total = float(df["valor_cubierto"].sum())
 
-    # Por perfil
     gp = (
         df.groupby("perfil_cobertura")
         .agg(total=("id_solicitud", "count"), cubiertos=("cubre", "sum"),
@@ -134,7 +267,6 @@ def get_stats():
         for _, r in gp.iterrows()
     ]
 
-    # Por día
     df2 = df.copy()
     df2["fecha"] = pd.to_datetime(df2["fecha_solicitud"]).dt.strftime("%Y-%m-%d")
     gd = (
@@ -148,7 +280,6 @@ def get_stats():
         for _, r in gd.iterrows()
     ]
 
-    # Top servicios
     gs = (
         df.groupby("servicio_solicitado")
         .agg(total=("id_solicitud", "count"), cubiertos=("cubre", "sum"),
@@ -167,7 +298,6 @@ def get_stats():
         for _, r in gs.iterrows()
     ]
 
-    # Por medio emisor
     por_medio = {k: int(v) for k, v in df["medio_emisor"].value_counts().head(10).items()}
 
     return {
@@ -236,7 +366,7 @@ def get_solicitudes(
 def export_csv():
     df = get_df()
     if df is None:
-        return {"error": "No hay resultados"}
+        return {"error": "No hay resultados disponibles. Ejecute el procesamiento primero."}
 
     output = io.StringIO()
     df.to_csv(output, index=False)
@@ -247,3 +377,13 @@ def export_csv():
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=resultados_clasificacion.csv"},
     )
+
+
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "bucket": BUCKET,
+        "glue_job": GLUE_JOB_NAME,
+        "version": "2.0.0",
+    }

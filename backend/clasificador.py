@@ -1,23 +1,28 @@
-import os
+import io
+
+import boto3
 import pandas as pd
 
 
 class ClasificadorChernovia:
-    def __init__(self, data_dir: str):
-        self.data_dir = data_dir
+    def __init__(self, bucket: str, raw_prefix: str = "raw"):
+        self.bucket = bucket
+        self.raw_prefix = raw_prefix
         self._cargar_catalogos()
 
+    def _leer_csv(self, filename: str) -> pd.DataFrame:
+        s3 = boto3.client("s3")
+        key = f"{self.raw_prefix}/{filename}"
+        obj = s3.get_object(Bucket=self.bucket, Key=key)
+        return pd.read_csv(io.BytesIO(obj["Body"].read()))
+
     def _cargar_catalogos(self):
-        servicios_df = pd.read_csv(
-            os.path.join(self.data_dir, "COIL_catalogo_servicios_cubiertos.csv")
-        )
+        servicios_df = self._leer_csv("COIL_catalogo_servicios_cubiertos.csv")
         self.servicios_cubiertos = set(
             servicios_df[servicios_df["cubre_sistema_publico"] == "SI"]["servicio"].str.strip()
         )
 
-        perfiles_df = pd.read_csv(
-            os.path.join(self.data_dir, "COIL_catalogo_perfiles_cobertura.csv")
-        )
+        perfiles_df = self._leer_csv("COIL_catalogo_perfiles_cobertura.csv")
         self.perfiles = dict(
             zip(
                 perfiles_df["perfil_cobertura"],
@@ -26,12 +31,19 @@ class ClasificadorChernovia:
         )
 
     def procesar(self, on_step=None):
-        dataset_path = os.path.join(self.data_dir, "COIL_dataset_glosas_salud_1_2M.csv")
-
         if on_step:
             on_step("leyendo", 5)
 
-        df = pd.read_csv(dataset_path)
+        # Leer dataset principal desde S3 en chunks para eficiencia de memoria
+        s3 = boto3.client("s3")
+        key = f"{self.raw_prefix}/COIL_dataset_glosas_salud_1_2M.csv"
+        obj = s3.get_object(Bucket=self.bucket, Key=key)
+
+        chunks = []
+        for chunk in pd.read_csv(io.BytesIO(obj["Body"].read()), chunksize=200_000):
+            chunks.append(chunk)
+
+        df = pd.concat(chunks, ignore_index=True)
 
         if on_step:
             on_step("extrayendo", 35)
