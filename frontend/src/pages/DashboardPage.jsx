@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
-  FileText, CheckCircle2, XCircle, DollarSign, TrendingUp, Database,
+  FileText, CheckCircle2, XCircle, DollarSign, TrendingUp, Database, AlertTriangle,
 } from 'lucide-react'
 import { api } from '../api/client'
 import StatsCard from '../components/StatsCard'
@@ -18,12 +18,15 @@ function fmt(n) {
 export default function DashboardPage() {
   const [stats, setStats] = useState(null)
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
 
   const fetchStats = useCallback(async () => {
+    setError(null)
     try {
       const res = await api.getStats()
       setStats(res.data)
-    } catch (_) {
+    } catch (err) {
+      setError(err.message)
       setStats(null)
     } finally {
       setLoading(false)
@@ -44,6 +47,16 @@ export default function DashboardPage() {
         </div>
         <ProcessPanel onCompleted={fetchStats} />
       </div>
+
+      {error && (
+        <div className="flex items-start gap-3 p-4 bg-red-50 border border-red-200 rounded-lg text-sm">
+          <AlertTriangle className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
+          <div>
+            <p className="font-semibold text-red-800">Error al cargar los datos</p>
+            <p className="text-red-600 mt-0.5">{error}</p>
+          </div>
+        </div>
+      )}
 
       {loading && (
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">

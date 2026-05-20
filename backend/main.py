@@ -2,29 +2,52 @@ import io
 import os
 import threading
 from datetime import datetime
+from typing import Optional
 
 import boto3
 import pandas as pd
-from fastapi import BackgroundTasks, FastAPI, Query
+from dotenv import load_dotenv
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Security
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from fastapi.security.api_key import APIKeyHeader
+from fastapi.staticfiles import StaticFiles
 
 from clasificador import ClasificadorChernovia
 
+load_dotenv()
+
 app = FastAPI(title="Chernovia Health API", version="2.0.0")
+
+# ── CORS ──────────────────────────────────────────────────────────────────────
+_raw_origins = os.environ.get("ALLOWED_ORIGINS", "http://localhost:5173")
+ALLOWED_ORIGINS = [o.strip() for o in _raw_origins.split(",") if o.strip()]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_methods=["GET", "POST"],
+    allow_headers=["X-API-Key", "Content-Type"],
 )
 
+# ── Autenticación por API Key ─────────────────────────────────────────────────
+API_KEY = os.environ.get("API_KEY", "")
+_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+def verify_api_key(key: str = Security(_api_key_header)):
+    if not API_KEY:
+        # Sin API_KEY configurada, se permite acceso (modo desarrollo)
+        return
+    if key != API_KEY:
+        raise HTTPException(status_code=401, detail="API key inválida o ausente")
+
+
 # ── Configuración AWS ────────────────────────────────────────────────────────
-BUCKET = os.environ.get("S3_BUCKET", "chernovia-health-licitacion-213238636264")
+BUCKET = os.environ.get("S3_BUCKET", "")
 RAW_PREFIX = "raw"
 RESULTS_KEY = "results/resultado_clasificacion.parquet"
-GLUE_JOB_NAME = "chernovia-clasificacion-batch"
+GLUE_JOB_NAME = os.environ.get("GLUE_JOB_NAME", "chernovia-clasificacion-batch")
 TMP_DIR = os.environ.get("TMP_DIR", "/tmp/chernovia")
 TMP_RESULTS = os.path.join(TMP_DIR, "resultado_clasificacion.parquet")
 
@@ -58,7 +81,7 @@ def set_state(**kwargs):
         _state.update(kwargs)
 
 
-def get_df() -> pd.DataFrame | None:
+def get_df() -> Optional[pd.DataFrame]:
     if _cache["valid"] and _cache["df"] is not None:
         return _cache["df"]
 
@@ -126,7 +149,6 @@ def _trigger_glue():
         run_id = response["JobRunId"]
         set_state(glue_run_id=run_id, paso=f"Job Glue en ejecución: {run_id}", progreso=10)
 
-        # Monitorear estado del job
         while True:
             import time
             time.sleep(15)
@@ -162,8 +184,7 @@ def _trigger_glue():
                 )
                 break
 
-    except Exception as exc:
-        # Fallback: procesar localmente si Glue falla
+    except Exception:
         set_state(paso="Glue no disponible, procesando localmente...", progreso=20, modo="local")
         _run_local()
 
@@ -211,7 +232,11 @@ def _run_local():
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
 @app.post("/api/process")
-def start_process(background_tasks: BackgroundTasks, modo: str = Query("glue")):
+def start_process(
+    background_tasks: BackgroundTasks,
+    modo: str = Query("glue"),
+    _: None = Depends(verify_api_key),
+):
     if get_state()["estado"] == "procesando":
         return {"message": "Ya hay un procesamiento en curso"}
     if modo == "local":
@@ -224,9 +249,8 @@ def start_process(background_tasks: BackgroundTasks, modo: str = Query("glue")):
 
 
 @app.get("/api/process/status")
-def process_status():
+def process_status(_: None = Depends(verify_api_key)):
     state = get_state()
-    # Si hay un job Glue activo, actualizar estado en tiempo real
     if state.get("estado") == "procesando" and state.get("glue_run_id"):
         try:
             glue = boto3.client("glue")
@@ -240,7 +264,7 @@ def process_status():
 
 
 @app.get("/api/stats")
-def get_stats():
+def get_stats(_: None = Depends(verify_api_key)):
     df = get_df()
     if df is None:
         return {"data": None}
@@ -323,6 +347,7 @@ def get_solicitudes(
     perfil: str = Query(None),
     cubre: str = Query(None),
     search: str = Query(None),
+    _: None = Depends(verify_api_key),
 ):
     df = get_df()
     if df is None:
@@ -363,7 +388,7 @@ def get_solicitudes(
 
 
 @app.get("/api/export")
-def export_csv():
+def export_csv(_: None = Depends(verify_api_key)):
     df = get_df()
     if df is None:
         return {"error": "No hay resultados disponibles. Ejecute el procesamiento primero."}
@@ -387,3 +412,8 @@ def health():
         "glue_job": GLUE_JOB_NAME,
         "version": "2.0.0",
     }
+
+
+STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+if os.path.isdir(STATIC_DIR):
+    app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")

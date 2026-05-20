@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Search, ChevronLeft, ChevronRight, CheckCircle2, XCircle, Filter, Database } from 'lucide-react'
+import { Search, ChevronLeft, ChevronRight, CheckCircle2, XCircle, Filter, Database, AlertTriangle } from 'lucide-react'
 import { api } from '../api/client'
 
 const PERFILES = ['PRIORITARIO', 'ESTANDAR', 'COPAGO']
@@ -24,9 +24,11 @@ export default function SolicitudesPage() {
   const [perfil, setPerfil] = useState('')
   const [cubre, setCubre] = useState('')
   const [searchInput, setSearchInput] = useState('')
+  const [fetchError, setFetchError] = useState(null)
 
   const fetchData = useCallback(async () => {
     setLoading(true)
+    setFetchError(null)
     try {
       const res = await api.getSolicitudes({ page, limit: 50, search, perfil, cubre })
       if (res.error) {
@@ -38,7 +40,8 @@ export default function SolicitudesPage() {
         setTotal(res.total)
         setPages(res.pages)
       }
-    } catch (_) {
+    } catch (err) {
+      setFetchError(err.message)
       setNoData(true)
       setData([])
     } finally {
@@ -125,8 +128,19 @@ export default function SolicitudesPage() {
         </span>
       </div>
 
+      {/* Error state */}
+      {fetchError && (
+        <div className="flex items-start gap-3 p-4 bg-red-50 border border-red-200 rounded-lg text-sm">
+          <AlertTriangle className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
+          <div>
+            <p className="font-semibold text-red-800">Error al cargar solicitudes</p>
+            <p className="text-red-600 mt-0.5">{fetchError}</p>
+          </div>
+        </div>
+      )}
+
       {/* No data state */}
-      {noData && (
+      {noData && !fetchError && (
         <div className="card flex flex-col items-center justify-center py-20 text-center">
           <Database className="w-12 h-12 text-gray-300 mb-3" />
           <p className="text-gray-600 font-medium">Sin datos procesados</p>

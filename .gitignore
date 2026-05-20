@@ -33,5 +33,23 @@ env/
 # ============================================================
 .DS_Store
 .env
+.env.local
+.env.*.local
 .vscode/
 node_modules/
+
+# ============================================================
+# Terraform
+# ============================================================
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.backup
+terraform/*.tfvars
+terraform/.terraform.lock.hcl
+
+# ============================================================
+# Build / dist
+# ============================================================
+frontend/dist/
+__pycache__/
+.pytest_cache/

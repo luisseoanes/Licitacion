@@ -1,0 +1,5 @@
+project_name      = "chernovia-health"
+aws_region        = "us-east-1"
+bucket_suffix     = "213238636264"   # Reemplaza con tu ID de cuenta AWS
+glue_job_name     = "chernovia-clasificacion-batch"
+glue_max_capacity = 8
