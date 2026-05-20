@@ -26,3 +26,14 @@ variable "glue_max_capacity" {
   type        = number
   default     = 8
 }
+
+variable "instance_type" {
+  description = "Tipo de instancia EC2 para la API (t3.micro para 1.2M sol/día, t3.small para 12M)"
+  type        = string
+  default     = "t3.micro"
+
+  validation {
+    condition     = contains(["t3.micro", "t3.small", "t3.medium"], var.instance_type)
+    error_message = "instance_type debe ser t3.micro, t3.small o t3.medium."
+  }
+}

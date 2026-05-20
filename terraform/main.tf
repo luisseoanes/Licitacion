@@ -175,6 +175,113 @@ resource "aws_cloudwatch_log_group" "glue" {
   tags              = local.common_tags
 }
 
+# ── EC2: Servidor de API + módulos diferenciales ─────────────────────────────
+
+resource "aws_security_group" "api" {
+  name        = "${var.project_name}-api-sg"
+  description = "Acceso publico al dashboard/API (:8000) y SSH para administracion"
+  tags        = local.common_tags
+
+  ingress {
+    description = "FastAPI / Dashboard React"
+    from_port   = 8000
+    to_port     = 8000
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    description = "SSH administracion"
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+resource "aws_iam_role_policy_attachment" "ec2_ssm" {
+  role       = aws_iam_role.ec2_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+data "aws_ami" "amazon_linux_2" {
+  most_recent = true
+  owners      = ["amazon"]
+
+  filter {
+    name   = "name"
+    values = ["amzn2-ami-hvm-*-x86_64-gp2"]
+  }
+}
+
+resource "aws_instance" "api" {
+  ami                    = data.aws_ami.amazon_linux_2.id
+  instance_type          = var.instance_type
+  iam_instance_profile   = aws_iam_instance_profile.ec2_profile.name
+  vpc_security_group_ids = [aws_security_group.api.id]
+  tags                   = merge(local.common_tags, { Name = "${var.project_name}-api" })
+
+  root_block_device {
+    volume_type           = "gp3"
+    volume_size           = 8
+    delete_on_termination = true
+  }
+
+  # Bootstrap: instala dependencias, descarga artefactos de S3 y levanta el servicio
+  user_data = <<-EOF
+    #!/bin/bash
+    set -e
+    yum update -y
+    yum install -y python3 python3-pip
+
+    pip3 install --quiet \
+      "fastapi==0.111.0" \
+      "uvicorn==0.29.0" \
+      "boto3==1.34.0" \
+      "pandas==2.2.0" \
+      "pyarrow==15.0.0" \
+      "scikit-learn==1.4.0" \
+      "reportlab==4.1.0"
+
+    mkdir -p /opt/chernovia/static/assets
+
+    BUCKET="${local.bucket_name}"
+    REGION="${var.aws_region}"
+
+    for f in main.py clasificador.py clasificador_ml.py detector_anomalias.py generador_reporte.py; do
+      aws s3 cp "s3://$BUCKET/deploy/$f" "/opt/chernovia/$f" --region "$REGION"
+    done
+    aws s3 sync "s3://$BUCKET/deploy/static/" "/opt/chernovia/static/" --region "$REGION"
+
+    cat > /etc/systemd/system/chernovia.service <<UNIT
+    [Unit]
+    Description=Chernovia Health API
+    After=network.target
+
+    [Service]
+    User=ec2-user
+    WorkingDirectory=/opt/chernovia
+    ExecStart=/usr/bin/python3 -m uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1
+    Restart=always
+    RestartSec=5
+
+    [Install]
+    WantedBy=multi-user.target
+    UNIT
+
+    systemctl daemon-reload
+    systemctl enable chernovia
+    systemctl start chernovia
+  EOF
+}
+
 # ── AWS Glue: Job de clasificación ────────────────────────────────────────────
 resource "aws_glue_job" "clasificacion" {
   name         = var.glue_job_name
@@ -204,18 +311,3 @@ resource "aws_glue_job" "clasificacion" {
   }
 }
 
-# ── Outputs ───────────────────────────────────────────────────────────────────
-output "bucket_name" {
-  description = "Nombre del bucket S3"
-  value       = aws_s3_bucket.data_lake.id
-}
-
-output "glue_job_name" {
-  description = "Nombre del Glue job"
-  value       = aws_glue_job.clasificacion.name
-}
-
-output "ec2_instance_profile" {
-  description = "Instance profile para el EC2 del backend"
-  value       = aws_iam_instance_profile.ec2_profile.name
-}

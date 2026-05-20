@@ -417,8 +417,78 @@ Este campo convierte el sistema en un registro legible para auditores, médicos 
 | **Parquet** | 5-10x más eficiente que CSV, compresión nativa, columnar | CSV: lento para consultas, sin compresión |
 | **scikit-learn TF-IDF** | Fuzzy matching robusto con n-gramas de caracteres, sin dependencias externas | Elasticsearch: caro, requiere cluster separado |
 | **reportlab 4.1.0** | Generación de PDF en Python puro, sin servidor de documentos, 0 costo adicional | WeasyPrint: dependencias de sistema; Puppeteer: requiere Node.js |
+| **Terraform >= 1.5** | Infrastructure as Code: toda la infraestructura AWS versionada en git, reproducible con `terraform apply` | CloudFormation: sintaxis más verbosa, solo AWS; CDK: requiere Node.js |
+
+---
+
+## 9. Infraestructura como Código (IaC) — Terraform
+
+Toda la infraestructura AWS del proyecto está declarada en código Terraform bajo el directorio `terraform/`, siguiendo las mejores prácticas de Infrastructure as Code (IaC). Esto garantiza que el entorno sea **reproducible**, **versionado en git** y **auditable** — un requisito implícito en cualquier sistema de salud pública que deba ser replicable en distintas regiones o entornos.
+
+### 9.1 Archivos del Módulo Terraform
+
+```
+terraform/
+├── main.tf                  # Recursos AWS: S3, IAM, EC2, Glue, CloudWatch, SG
+├── variables.tf             # Variables con validación (instance_type, glue_workers, etc.)
+├── outputs.tf               # Outputs: API URL, EC2 ID, bucket ARN, Glue job name
+└── terraform.tfvars.example # Plantilla de configuración
+```
+
+### 9.2 Recursos Declarados
+
+| Recurso Terraform | Tipo AWS | Configuración |
+|---|---|---|
+| `aws_s3_bucket.data_lake` | S3 Bucket | Versioning + AES-256 + acceso privado + lifecycle 30/90 días |
+| `aws_iam_role.glue_role` | IAM Role | Trust: glue.amazonaws.com + política S3 + CloudWatch |
+| `aws_iam_role.ec2_role` | IAM Role | Trust: ec2.amazonaws.com + S3 + Glue + SSM + CloudWatch |
+| `aws_security_group.api` | Security Group | Ingress :8000 (público) + :22 (SSH) |
+| `aws_instance.api` | EC2 t3.micro | AMI Amazon Linux 2 + user_data bootstrap completo |
+| `aws_glue_job.clasificacion` | Glue Job | PySpark 4.0 + G.1X workers + CloudWatch continuo |
+| `aws_cloudwatch_log_group.api` | CloudWatch | Retención 30 días |
+| `aws_cloudwatch_log_group.glue` | CloudWatch | Retención 30 días |
+
+### 9.3 Flujo de Aprovisionamiento
+
+```bash
+# 1. Configurar variables
+cp terraform/terraform.tfvars.example terraform/terraform.tfvars
+# Editar terraform.tfvars con bucket_suffix = ID de cuenta AWS
+
+# 2. Inicializar providers
+terraform -chdir=terraform init
+
+# 3. Verificar plan antes de aplicar
+terraform -chdir=terraform plan
+
+# 4. Aprovisionar infraestructura completa (~3 minutos)
+terraform -chdir=terraform apply
+
+# 5. Obtener URL del sistema
+terraform -chdir=terraform output api_url
+# → http://<IP>:8000
+
+# 6. Para escalar a 12M solicitudes (cambiar solo instance_type)
+terraform -chdir=terraform apply -var="instance_type=t3.small"
+```
+
+### 9.4 Escalado Declarativo
+
+El escalado de 1.2M a 12M solicitudes diarias requiere cambiar **una sola variable** en el tfvars:
+
+```hcl
+# Para 1.2M solicitudes/día (demo actual)
+instance_type     = "t3.micro"
+glue_max_capacity = 4   # 2 G.1X workers
+
+# Para 12M solicitudes/día (objetivo Chernovia)
+instance_type     = "t3.small"
+glue_max_capacity = 16  # 8 G.1X workers
+```
+
+`terraform apply` aplica únicamente los cambios necesarios, sin recrear recursos estables (S3, IAM, CloudWatch). **Tiempo de escalado: ~90 segundos** (reemplazo de instancia EC2 + ajuste del Glue job).
 
 ---
 
 *Documento técnico — DataHealth Cloud Solutions — Mayo 2026*  
-*Versión 3.0 — Incluye módulos diferenciales: Explicabilidad, Anti-fraude, Simulador, PDF, Admin catálogos*
+*Versión 3.0 — Incluye módulos diferenciales: Explicabilidad, Anti-fraude, Simulador, PDF, Admin catálogos, IaC Terraform*

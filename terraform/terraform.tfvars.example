@@ -1,5 +1,6 @@
 project_name      = "chernovia-health"
 aws_region        = "us-east-1"
-bucket_suffix     = "213238636264"   # Reemplaza con tu ID de cuenta AWS
+bucket_suffix     = "213238636264"   # ID de cuenta AWS
 glue_job_name     = "chernovia-clasificacion-batch"
 glue_max_capacity = 8
+instance_type     = "t3.micro"       # t3.small para escalar a 12M solicitudes/día
