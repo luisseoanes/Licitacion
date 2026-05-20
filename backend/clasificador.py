@@ -64,6 +64,7 @@ class ClasificadorChernovia:
         )
         df.loc[~df["cubre"], "porcentaje_cobertura"] = 0
         df["valor_cubierto"] = df["valor_procedimiento"] * df["porcentaje_cobertura"] / 100
+        df["razon_decision"] = df.apply(self._generar_razon, axis=1)
 
         if on_step:
             on_step("guardando", 90)
@@ -80,5 +81,24 @@ class ClasificadorChernovia:
                 "cubre",
                 "porcentaje_cobertura",
                 "valor_cubierto",
+                "razon_decision",
             ]
         ].copy()
+
+    @staticmethod
+    def _generar_razon(row) -> str:
+        servicio = row.get("servicio_solicitado", "") or ""
+        cubre = row.get("cubre", False)
+        perfil = row.get("perfil_cobertura", "") or "DESCONOCIDO"
+        pct = row.get("porcentaje_cobertura", 0)
+        if not servicio:
+            return "No se pudo extraer el ServicioSolicitado de la glosa médica."
+        if cubre:
+            return (
+                f"Servicio '{servicio}' incluido en catálogo DS-2024-001. "
+                f"Perfil {perfil}: {pct}% reconocido por el sistema público."
+            )
+        return (
+            f"Servicio '{servicio}' no figura en el catálogo de servicios cubiertos "
+            f"(Resolución DS-2024-001). Cobertura pública: 0%."
+        )

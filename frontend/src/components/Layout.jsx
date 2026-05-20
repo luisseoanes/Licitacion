@@ -1,10 +1,14 @@
 import { NavLink, Outlet } from 'react-router-dom'
-import { LayoutDashboard, List, Download, Shield, Activity } from 'lucide-react'
+import { LayoutDashboard, List, Download, Shield, Activity, Zap, AlertTriangle, TrendingUp, BookOpen, FileText } from 'lucide-react'
 import { api } from '../api/client'
 
 const navItems = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true },
   { to: '/solicitudes', label: 'Solicitudes', icon: List },
+  { to: '/clasificar', label: 'Demo en tiempo real', icon: Zap },
+  { to: '/anomalias', label: 'Anti-Fraude', icon: AlertTriangle },
+  { to: '/simulador', label: 'Simulador de política', icon: TrendingUp },
+  { to: '/catalogo', label: 'Catálogos', icon: BookOpen },
 ]
 
 export default function Layout() {
@@ -44,14 +48,21 @@ export default function Layout() {
           ))}
         </nav>
 
-        {/* Export button */}
-        <div className="px-3 py-4 border-t border-slate-700">
+        {/* Export buttons */}
+        <div className="px-3 py-4 border-t border-slate-700 space-y-1">
           <button
             onClick={() => api.exportCsv()}
             className="flex items-center gap-3 w-full px-3 py-2 rounded-lg text-sm font-medium text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
           >
             <Download className="w-4 h-4" />
             Exportar CSV
+          </button>
+          <button
+            onClick={() => api.downloadReporte()}
+            className="flex items-center gap-3 w-full px-3 py-2 rounded-lg text-sm font-medium text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+          >
+            <FileText className="w-4 h-4" />
+            Reporte PDF
           </button>
         </div>
 

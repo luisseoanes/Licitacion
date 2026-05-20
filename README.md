@@ -151,9 +151,12 @@ Configura la misma clave en `backend/.env` (`API_KEY`) y en `frontend/.env.local
 |--------|------|-------------|
 | `POST` | `/api/process` | Dispara clasificación (Glue o local) |
 | `GET` | `/api/process/status` | Estado en tiempo real del job |
-| `GET` | `/api/stats` | Estadísticas agregadas del dashboard |
+| `GET` | `/api/stats` | Estadísticas pre-agregadas del dashboard |
 | `GET` | `/api/solicitudes` | Registros paginados con filtros |
 | `GET` | `/api/export` | Descarga CSV de resultados |
+| `POST` | `/api/classify` | Clasificación individual ML (fuzzy matching) |
+| `GET` | `/api/quality` | Métricas de calidad del modelo ML |
+| `GET` | `/api/glue/status` | Verifica disponibilidad del job Glue |
 | `GET` | `/health` | Health check del sistema |
 
 ## Lógica de clasificación
@@ -161,11 +164,16 @@ Configura la misma clave en `backend/.env` (`API_KEY`) y en `frontend/.env.local
 ```
 ¿ServicioSolicitado ∈ catálogo de servicios cubiertos?
 ├─ NO   → cubre=false, porcentaje=0%, valor_cubierto=$0
-└─ SÍ   → leer PerfilCobertura:
+└─ SÍ   → leer PerfilCobertura (COIL_catalogo_perfiles_cobertura.csv):
           ├─ PRIORITARIO  → 100% cobertura
           ├─ ESTANDAR     → 50% cobertura
           └─ COPAGO       → 25% cobertura
           → valor_cubierto = valor_procedimiento × porcentaje / 100
+
+Fuzzy matching ML (/api/classify):
+  → TF-IDF char_wb ngrams 2–4 + cosine similarity
+  → umbral: sim ≥ 0.72 → fuzzy_ml | exacto | sin_match
+  → retorna: servicio_canonico, confianza, metodo
 ```
 
 ## Escalabilidad y costos
